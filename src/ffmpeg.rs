@@ -195,6 +195,28 @@ mod tests {
         assert!(!is_ffmpeg_exe("bin/notffmpeg.exe"));
     }
 
+    /// Times the download of our slim build: `cargo test --release slim_download -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn slim_download() {
+        let dir = std::env::temp_dir().join("comprimo-dl-test");
+        fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join("ffmpeg.zip");
+        let start = std::time::Instant::now();
+        let mut events = 0;
+        download_file(SOURCES[0].0, &archive, &mut |_| events += 1, &AtomicBool::new(false)).unwrap();
+        let size = fs::metadata(&archive).unwrap().len();
+        println!("downloaded {} in {:.2?} ({events} progress events)", human_size(size), start.elapsed());
+        let exe = dir.join("ffmpeg.exe");
+        let start = std::time::Instant::now();
+        extract_zip(&archive, &exe).unwrap();
+        println!("extracted in {:.2?}", start.elapsed());
+        let start = std::time::Instant::now();
+        assert!(has_x264(&exe));
+        println!("checked in {:.2?}", start.elapsed());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Downloads and unpacks the gyan.dev 7z: `cargo test --release seven_zip -- --ignored --nocapture`
     #[test]
     #[ignore]
