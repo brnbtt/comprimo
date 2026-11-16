@@ -1,0 +1,35 @@
+name: ffmpeg-slim
+
+# Builds the minimal ffmpeg.exe and publishes it to the "ffmpeg" release,
+# which is where comprimo downloads it from on install.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [ffmpeg-slim/build.sh, .github/workflows/ffmpeg-slim.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross-compile tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc mingw-w64 nasm meson ninja-build cmake make pkg-config git curl xz-utils zip
+
+      - name: Build
+        run: bash ffmpeg-slim/build.sh
+
+      - name: Publish to the "ffmpeg" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view ffmpeg >/dev/null 2>&1 || gh release create ffmpeg \
+            --title "ffmpeg (slim build)" --latest=false \
+            --notes "Minimal ffmpeg used by comprimo, built from ffmpeg-slim/build.sh. Downloaded automatically on install."
+          gh release upload ffmpeg ffmpeg-slim/out/comprimo-ffmpeg-win64.zip --clobber

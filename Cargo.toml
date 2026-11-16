@@ -1,0 +1,39 @@
+[package]
+name = "comprimo"
+version = "0.1.0"
+edition = "2024"
+description = "Right-click any video to shrink it under a size limit."
+license = "MIT"
+repository = "https://github.com/brnbtt/comprimo"
+
+[[bin]]
+name = "comprimo"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = "3"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+sevenz-rust2 = { version = "0.25", default-features = false }
+rodio = { version = "0.23", default-features = false, features = ["playback"] }
+raw-window-handle = "0.6"
+winreg = "0.56"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_System_DataExchange",
+    "Win32_System_JobObjects",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
