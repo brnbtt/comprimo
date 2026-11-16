@@ -15,6 +15,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # checkout fetches tags without their message; get the real annotated tag for the notes.
+      - name: Fetch tag
+        run: git fetch --force origin "refs/tags/${{ github.ref_name }}:refs/tags/${{ github.ref_name }}"
+
       - name: Test
         run: cargo test --release
 
