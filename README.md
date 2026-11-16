@@ -72,29 +72,24 @@ Every sound is synthesized in code (`src/sound.rs`): no audio files. Run `compri
 
 ## Speed
 
-comprimo measures your machine instead of guessing:
+comprimo always takes the fastest route your PC has:
 
-1. The x264 analysis pass (which two-pass encoding needs anyway) always runs at the same settings,
-   so how long it takes is a benchmark of this PC on this particular video.
-2. From that it predicts how long each final-pass setting would take, and picks the best one that
-   still finishes quickly: x264 `slower` if the whole job fits in about 25 s, `slow` if it fits in
-   about 45 s.
-3. If it would take longer and your PC has a hardware video encoder (NVIDIA NVENC, Intel Quick Sync
-   or AMD AMF, in that order), it switches to the GPU right away, often a few seconds into the
-   analysis. GPU encoding is several times faster and leaves the CPU free.
-4. Without a GPU encoder it trades x264 effort for speed (`medium`, then `fast`).
+1. **Graphics card first.** If your PC has a hardware video encoder (NVIDIA NVENC, Intel Quick Sync
+   or AMD AMF, in that order), comprimo uses it. It's several times faster than the CPU and leaves
+   the CPU free.
+2. **Otherwise the CPU**, using two-pass x264 at its `fast` preset: quick, and still precise about
+   the size.
 
-GPU support is detected by test-encoding a few frames of the actual video with the actual settings
-(in the background, while the analysis runs), so missing GPUs and old drivers are caught up front. If
-a GPU encode fails midway, comprimo falls back to the CPU.
+The graphics card is checked by test-encoding a few frames of the actual video with the actual
+settings (about 0.2 s), so missing GPUs and old drivers are caught up front. If a GPU encode fails
+midway, comprimo falls back to the CPU.
 
-Measured on an i9-14900K + RTX 4080 SUPER, VMAF at equal file size:
+Measured on an i9-14900K + RTX 4080 SUPER, 1 minute of 1080p60 → 20 MB:
 
-| Job | Choice | Time | VMAF |
-|---|---|---|---|
-| 40 s 1080p → 25 MB | x264 slower | 17 s | 92.4 |
-| 5 min 1080p → 100 MB | NVENC (auto) | 24 s | 82.6 |
-| 5 min 1080p → 100 MB, GPU disabled | x264 medium | 43 s | 84.3 |
+| Route | Time |
+|---|---|
+| Graphics card (NVENC) | 4.8 s |
+| Processor (x264 `fast`) | 10.8 s |
 
 Set `COMPRIMO_ENCODER=x264|nvenc|qsv|amf` to force an encoder.
 
@@ -108,8 +103,8 @@ Set `COMPRIMO_ENCODER=x264|nvenc|qsv|amf` to force an encoder.
    comprimo picks the largest size that still gets enough *bits per pixel*. It steps down
    1440p → 1080p → 720p → 540p → 480p → 360p → 240p. It keeps 60 fps down to 720p before
    dropping to 30 fps. It never upscales, and it handles portrait/rotated phone videos.
-4. **Two-pass H.264** (High profile, `yuv420p`, `+faststart`) so the file lands right at the target
-   and plays everywhere, unless the GPU is used (see [Speed](#speed)).
+4. **H.264** (High profile, `yuv420p`, `+faststart`) so it plays everywhere: on the graphics card with
+   its highest-quality multipass settings, or two-pass x264 on the CPU (see [Speed](#speed)).
 5. **Verification:** if the result is still over the limit (grainy or noisy footage can throw off
    two-pass rate control), it retries. First it switches to adaptive single-pass encoding, then
    lowers the bitrate, then the resolution.

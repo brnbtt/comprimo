@@ -1,13 +1,11 @@
 //! Hardware (GPU) H.264 encoders: detection and settings.
 //!
 //! GPU encoders are several times faster than x264 and leave the CPU free, at roughly the quality
-//! of x264's "fast" preset. comprimo uses them when x264 would make you wait (see `encode`).
+//! of x264's "fast" preset. comprimo always uses one when the PC has one that works (see `encode`).
 
 use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use crate::encode::CREATE_NO_WINDOW;
 use crate::ffmpeg::Tools;
@@ -28,14 +26,6 @@ impl Gpu {
             Gpu::Nvenc => "h264_nvenc",
             Gpu::Qsv => "h264_qsv",
             Gpu::Amf => "h264_amf",
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Gpu::Nvenc => "nvidia gpu",
-            Gpu::Qsv => "intel gpu",
-            Gpu::Amf => "amd gpu",
         }
     }
 
@@ -151,41 +141,4 @@ pub fn detect(tools: &Tools, input: &Path, filters: &str, bps: u64) -> Option<Gp
             .status()
             .is_ok_and(|s| s.success())
     })
-}
-
-/// GPU detection running in the background, so it overlaps with the analysis pass.
-pub struct Probe(Arc<Mutex<Option<Option<Gpu>>>>);
-
-impl Probe {
-    pub fn start(tools: Tools, input: PathBuf, filters: String, bps: u64) -> Self {
-        let slot = Arc::new(Mutex::new(None));
-        let out = slot.clone();
-        std::thread::spawn(move || {
-            let found = detect(&tools, &input, &filters, bps);
-            *out.lock().unwrap() = Some(found);
-        });
-        Probe(slot)
-    }
-
-    pub fn ready(gpu: Option<Gpu>) -> Self {
-        Probe(Arc::new(Mutex::new(Some(gpu))))
-    }
-
-    /// `None` while still testing.
-    pub fn result(&self) -> Option<Option<Gpu>> {
-        *self.0.lock().unwrap()
-    }
-
-    pub fn wait(&self, max: Duration) -> Option<Gpu> {
-        let start = Instant::now();
-        loop {
-            if let Some(r) = self.result() {
-                return r;
-            }
-            if start.elapsed() >= max {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
 }

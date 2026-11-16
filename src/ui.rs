@@ -888,7 +888,7 @@ impl SetupApp {
     }
 }
 
-/// Footer pill label for a task status ("downloading ffmpeg · one-time setup" → "downloading ffmpeg").
+/// Footer pill label for a task status ("downloading the video engine · one-time setup" → "downloading the video engine").
 fn short_status(status: &str) -> &str {
     status.split(" · ").next().unwrap_or(status)
 }

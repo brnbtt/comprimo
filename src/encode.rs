@@ -4,11 +4,10 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
 
 use crate::config::{fmt_duration, fmt_mb, human_size};
 use crate::ffmpeg::Tools;
-use crate::gpu::{Gpu, Probe};
+use crate::gpu::{self, Gpu};
 use crate::probe::{MediaInfo, probe};
 
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -92,55 +91,43 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// Plain-words summary for the progress window, e.g. "720p · 30 fps · on your graphics card".
     pub fn describe(&self, encoder: Option<Encoder>) -> String {
-        let audio =
-            if self.audio_bps > 0.0 { format!(" · {:.0} kbps audio", self.audio_bps / 1000.0) } else { String::new() };
-        let encoder = match encoder {
-            Some(Encoder::X264(preset)) => format!(" · cpu, {preset}"),
-            Some(Encoder::Gpu(g)) => format!(" · {}", g.label()),
-            None => String::new(),
-        };
-        format!(
-            "{}×{} · {} fps · {} video{}{}",
-            self.out_w,
-            self.out_h,
-            (self.fps * 100.0).round() / 100.0,
-            fmt_bitrate(self.video_bps),
-            audio,
-            encoder
-        )
+        let mut s = format!("{} · {} fps", res_label(self.out_w, self.out_h), self.fps.round());
+        match encoder {
+            Some(Encoder::Gpu(_)) => s.push_str(" · on your graphics card"),
+            Some(Encoder::X264) => s.push_str(" · on your processor"),
+            None => {}
+        }
+        s
     }
+}
+
+/// "1080p", "720p": the short side, which is how people know video sizes (works for portrait too).
+pub fn res_label(w: u32, h: u32) -> String {
+    format!("{}p", w.min(h))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoder {
-    /// x264 with this preset for the final pass (the analysis pass always runs at "medium").
-    X264(&'static str),
+    /// Two-pass x264 at [`X264_PRESET`], for PCs without a usable hardware encoder.
+    X264,
     Gpu(Gpu),
 }
 
-/// Final-pass x264 presets, best first, with their measured cost relative to the analysis pass.
-const X264_FINAL: [(&str, f64); 4] = [("slower", 3.9), ("slow", 2.8), ("medium", 1.6), ("fast", 1.3)];
+/// x264 effort when encoding on the CPU: comprimo always picks the fastest way to encode, and
+/// "fast" is where x264 is quick without visibly losing quality.
+const X264_PRESET: &str = "fast";
 
-/// Picks how to encode, given how long the analysis pass takes on this machine.
-/// Short jobs get x264's best settings (the wait is short anyway); once x264 would take a while,
-/// a GPU encoder is several times faster at a small quality cost. `None` = use the GPU.
-fn choose_encoder(analysis_secs: f64, gpu_available: bool) -> Option<&'static str> {
-    let total = |ratio: f64| analysis_secs * (1.0 + ratio);
-    if total(X264_FINAL[0].1) <= 25.0 {
-        return Some("slower");
+/// The fastest way to encode on this PC: a GPU encoder if one works here (several times faster
+/// than the CPU, and leaves it free), otherwise x264. `COMPRIMO_ENCODER=x264|nvenc|qsv|amf`
+/// forces one.
+fn pick_encoder(tools: &Tools, input: &Path, plan: &Plan) -> Encoder {
+    match std::env::var("COMPRIMO_ENCODER").ok().as_deref() {
+        Some("x264") => Encoder::X264,
+        Some(name) if Gpu::from_name(name).is_some() => Encoder::Gpu(Gpu::from_name(name).unwrap()),
+        _ => gpu::detect(tools, input, &plan.filters, plan.video_bps as u64).map_or(Encoder::X264, Encoder::Gpu),
     }
-    if total(X264_FINAL[1].1) <= 45.0 {
-        return Some("slow");
-    }
-    if gpu_available {
-        return None;
-    }
-    Some(if total(X264_FINAL[2].1) <= 120.0 { "medium" } else { "fast" })
-}
-
-fn fmt_bitrate(bps: f64) -> String {
-    if bps >= 1_000_000.0 { format!("{:.2} Mbps", bps / 1_000_000.0) } else { format!("{:.0} kbps", bps / 1000.0) }
 }
 
 /// Audio gets a share of the budget that scales with how much room there is overall.
@@ -181,10 +168,9 @@ pub fn make_plan(info: &MediaInfo, target_bytes: u64, bitrate_scale: f64, max_sh
     video_bps *= bitrate_scale;
     if video_bps < MIN_VIDEO_BPS {
         return Err(format!(
-            "This video is too long to fit in {} MB.\n\nIt would need less than {:.0} kbps of video, which would be unwatchable. \
+            "This video is too long to fit in {} MB.\n\nThere wouldn't be enough room left to make it watchable. \
              Try a bigger size, or trim the video first.",
             fmt_mb(target_bytes as f64 / 1_000_000.0),
-            MIN_VIDEO_BPS / 1000.0
         )
         .into());
     }
@@ -260,12 +246,12 @@ fn output_path(input: &Path, target_mb: f64) -> PathBuf {
 /// How a single ffmpeg run encodes video.
 #[derive(Clone, Copy)]
 enum Run<'a> {
-    /// x264 analysis pass (always at "medium", so its speed is a stable yardstick).
+    /// x264 analysis pass.
     Analysis(&'a Path),
     /// x264 final pass using the analysis stats.
-    Final(&'a Path, &'static str),
+    Final(&'a Path),
     /// x264 single pass (fallback when two-pass rate control misses).
-    X264Single(&'static str),
+    X264Single,
     Gpu(Gpu),
 }
 
@@ -284,22 +270,12 @@ fn video_args(input: &Path, plan: &Plan, run: Run) -> Vec<OsString> {
         a.extend(g.args(bps).into_iter().map(OsString::from));
         return a;
     }
-    let preset = match run {
-        Run::Analysis(_) => "medium",
-        Run::Final(_, p) | Run::X264Single(p) => p,
-        Run::Gpu(_) => unreachable!(),
-    };
-    for s in ["-c:v", "libx264", "-preset", preset, "-profile:v", "high", "-pix_fmt", "yuv420p"] {
+    for s in ["-c:v", "libx264", "-preset", X264_PRESET, "-profile:v", "high", "-pix_fmt", "yuv420p"] {
         a.push(s.into());
-    }
-    // "fast" uses simpler weighted prediction, which x264 rejects with "medium" analysis stats.
-    if matches!(run, Run::Final(_, "fast")) {
-        a.push("-weightp".into());
-        a.push("smart".into());
     }
     a.push("-b:v".into());
     a.push(bps.to_string().into());
-    if let Run::Analysis(log) | Run::Final(log, _) = run {
+    if let Run::Analysis(log) | Run::Final(log) = run {
         a.push("-pass".into());
         a.push(if matches!(run, Run::Analysis(_)) { "1" } else { "2" }.into());
         a.push("-passlogfile".into());
@@ -363,7 +339,7 @@ fn run_ffmpeg(
     if !status.success() {
         let tail: Vec<&str> = errors.lines().rev().take(8).collect();
         let tail: Vec<&str> = tail.into_iter().rev().collect();
-        return Err(format!("ffmpeg failed:\n{}", tail.join("\n")).into());
+        return Err(format!("The video engine (ffmpeg) stopped with an error:\n{}", tail.join("\n")).into());
     }
     Ok(true)
 }
@@ -391,11 +367,10 @@ pub fn compress(
     report(Event::Stage { stage: Stage::Analyzing, attempt: 0 });
     let info = probe(tools, input)?;
     report(Event::Source(format!(
-        "{} · {}×{} · {} fps · {}",
+        "{} · {} · {} fps · {}",
         human_size(info.size),
-        info.width,
-        info.height,
-        (info.fps * 100.0).round() / 100.0,
+        res_label(info.width, info.height),
+        info.fps.round(),
         fmt_duration(info.duration)
     )));
     let target_bytes = (target_mb * 1_000_000.0) as u64;
@@ -436,97 +411,57 @@ fn encode(
     let mut analyzed: Option<(u32, u32, u64)> = None;
     let mut last_size = 0;
 
-    // COMPRIMO_ENCODER=x264|nvenc|qsv|amf forces an encoder (handy for testing).
-    let forced = std::env::var("COMPRIMO_ENCODER").ok();
-    let mut encoder: Option<Encoder> = forced.as_deref().and_then(Gpu::from_name).map(Encoder::Gpu);
-    // Look for a usable GPU encoder while the analysis pass runs.
+    report(Event::Status("getting ready".into()));
     let first = make_plan(info, target_bytes, 1.0, u32::MAX)?;
-    let mut gpu = match forced {
-        Some(_) => Probe::ready(None),
-        None => Probe::start(tools.clone(), input.to_path_buf(), first.filters.clone(), first.video_bps as u64),
-    };
+    let mut encoder = pick_encoder(tools, input, &first);
+    if cancel.load(Ordering::Relaxed) {
+        return Err(JobError::Cancelled);
+    }
 
     let mut attempt = 0;
     while attempt < MAX_ATTEMPTS {
         let Ok(plan) = make_plan(info, target_bytes, bitrate_scale, max_short) else {
             break;
         };
-        report(Event::Detail(plan.describe(encoder)));
-        // Status names what's happening in plain words; retries say why.
-        let label = |what: &str| {
-            if attempt == 0 { what.to_string() } else { format!("fine-tuning size · {what}") }
-        };
+        report(Event::Detail(plan.describe(Some(encoder))));
+        // Plain words; retries say what's going on.
+        let label = |what: &str| if attempt == 0 { what.to_string() } else { "making it a little smaller".to_string() };
 
         // Pass-1 stats can be reused for a new bitrate, but not for a new resolution / frame rate.
         let key = (plan.out_w, plan.out_h, plan.fps.to_bits());
-        let on_gpu = matches!(encoder, Some(Encoder::Gpu(_)));
-        if !on_gpu && two_pass && analyzed != Some(key) {
+        if encoder == Encoder::X264 && two_pass && analyzed != Some(key) {
             report(Event::Progress(0.0));
-            report(Event::Status(label("analyzing motion")));
+            report(Event::Status(label("analyzing")));
             report(Event::Stage { stage: Stage::Pass1, attempt });
             let mut pass1 = video_args(input, &plan, Run::Analysis(passlog));
             for s in ["-an", "-f", "null", "NUL"] {
                 pass1.push(s.into());
             }
-            // The analysis pass doubles as a benchmark of this machine: if it shows x264 would
-            // take a while and a GPU encoder is available, switch to the GPU right away.
-            let started = Instant::now();
-            let undecided = encoder.is_none();
-            let mut switch_to = None;
-            let finished = run_ffmpeg(
+            run_ffmpeg(
                 tools,
                 &pass1,
                 info.duration,
                 &mut |f| {
                     report(Event::Progress(f * 0.5));
-                    let elapsed = started.elapsed().as_secs_f64();
-                    if undecided
-                        && elapsed >= 2.0
-                        && f >= 0.03
-                        && let Some(Some(g)) = gpu.result()
-                        && choose_encoder(elapsed / f as f64, true).is_none()
-                    {
-                        switch_to = Some(g);
-                        return false;
-                    }
                     true
                 },
                 cancel,
             )?;
-            if let (false, Some(g)) = (finished, switch_to) {
-                encoder = Some(Encoder::Gpu(g));
-                continue;
-            }
             analyzed = Some(key);
-            if encoder.is_none() {
-                let secs = started.elapsed().as_secs_f64();
-                let available = gpu.wait(Duration::from_secs(2));
-                encoder = Some(match (choose_encoder(secs, available.is_some()), available) {
-                    (Some(preset), _) => Encoder::X264(preset),
-                    (None, Some(g)) => Encoder::Gpu(g),
-                    (None, None) => Encoder::X264("fast"),
-                });
-                report(Event::Detail(plan.describe(encoder)));
-                if matches!(encoder, Some(Encoder::Gpu(_))) {
-                    continue;
-                }
-            }
         }
 
         let run = match encoder {
-            Some(Encoder::Gpu(g)) => Run::Gpu(g),
-            Some(Encoder::X264(p)) if two_pass => Run::Final(passlog, p),
-            Some(Encoder::X264(p)) => Run::X264Single(p),
-            None => Run::X264Single("medium"),
+            Encoder::Gpu(g) => Run::Gpu(g),
+            Encoder::X264 if two_pass => Run::Final(passlog),
+            Encoder::X264 => Run::X264Single,
         };
-        let (stage, start, what) = match run {
-            Run::Final(..) => (Stage::Pass2, 0.5, "compressing".to_string()),
-            Run::Gpu(g) => (Stage::Single, 0.0, format!("compressing on the {}", g.label())),
-            _ => (Stage::Single, 0.0, "compressing".to_string()),
+        let (stage, start) = match run {
+            Run::Final(..) => (Stage::Pass2, 0.5),
+            _ => (Stage::Single, 0.0),
         };
         let mut args = video_args(input, &plan, run);
         report(Event::Progress(start));
-        report(Event::Status(label(&what)));
+        report(Event::Status(label("compressing")));
         report(Event::Stage { stage, attempt });
         if plan.audio_bps > 0.0 {
             for s in ["-map", "0:a:0?", "-c:a", "aac", "-b:a"] {
@@ -554,10 +489,9 @@ fn encode(
             cancel,
         );
         match result {
-            // A GPU encoder that fails mid-way (driver hiccup, unusual input): fall back to x264.
-            Err(JobError::Failed(_)) if matches!(run, Run::Gpu(_)) && forced.is_none() => {
-                gpu = Probe::ready(None);
-                encoder = None;
+            // A GPU encoder that fails mid-way (driver hiccup, unusual input): fall back to the CPU.
+            Err(JobError::Failed(_)) if matches!(run, Run::Gpu(_)) => {
+                encoder = Encoder::X264;
                 two_pass = true;
                 continue;
             }
@@ -637,15 +571,11 @@ mod tests {
     }
 
     #[test]
-    fn encoder_follows_measured_speed() {
-        // A 40 s 1080p clip on a fast desktop: analysis takes ~3.5 s → best x264 settings.
-        assert_eq!(choose_encoder(3.5, true), Some("slower"));
-        assert_eq!(choose_encoder(9.0, true), Some("slow"));
-        // Longer: the GPU is several times faster, so use it when there is one...
-        assert_eq!(choose_encoder(20.0, true), None);
-        // ...otherwise trade x264 effort for speed.
-        assert_eq!(choose_encoder(20.0, false), Some("medium"));
-        assert_eq!(choose_encoder(120.0, false), Some("fast"));
+    fn details_are_plain_words() {
+        let p = make_plan(&info(1920, 1080, 29.97, 10.0), 10_000_000, 1.0, u32::MAX).unwrap();
+        assert_eq!(p.describe(Some(Encoder::X264)), "1080p · 30 fps · on your processor");
+        assert_eq!(p.describe(Some(Encoder::Gpu(Gpu::Nvenc))), "1080p · 30 fps · on your graphics card");
+        assert_eq!(res_label(1080, 1920), "1080p");
     }
 
     #[test]
@@ -685,8 +615,8 @@ mod tests {
             .map(|p| Tools { ffmpeg: PathBuf::from(p) })
             .or_else(crate::ffmpeg::find)
             .expect("ffmpeg needed");
-        // Test sources are generated with a full ffmpeg (needs lavfi), which may differ from `tools`.
-        let generator = crate::ffmpeg::find().expect("a full ffmpeg on PATH is needed to generate test clips");
+        // Test sources are generated with a full ffmpeg on PATH (needs lavfi), which may differ from `tools`.
+        let generator = Tools { ffmpeg: PathBuf::from("ffmpeg") };
         let dir = std::env::temp_dir().join("comprimo-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

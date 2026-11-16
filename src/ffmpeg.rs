@@ -70,12 +70,12 @@ pub fn download(report: &mut dyn FnMut(Event), cancel: &AtomicBool) -> Result<To
 
     let mut errors = Vec::new();
     for (url, kind) in &SOURCES {
-        report(Event::Status("downloading ffmpeg · one-time setup".into()));
+        report(Event::Status("downloading the video engine · one-time setup".into()));
         report(Event::Stage { stage: Stage::Preparing, attempt: 0 });
         report(Event::Progress(0.0));
         report(Event::Detail(String::new()));
         let result = download_file(url, &archive_path, report, cancel).and_then(|_| {
-            report(Event::Status("unpacking ffmpeg".into()));
+            report(Event::Status("setting up the video engine".into()));
             report(Event::Detail(String::new()));
             let tmp = dir.join("ffmpeg.exe.tmp");
             match kind {
@@ -84,7 +84,7 @@ pub fn download(report: &mut dyn FnMut(Event), cancel: &AtomicBool) -> Result<To
             }?;
             if !has_x264(&tmp) {
                 let _ = fs::remove_file(&tmp);
-                return Err("downloaded ffmpeg doesn't work on this PC".into());
+                return Err("the downloaded video engine (ffmpeg) doesn't work on this PC".into());
             }
             fs::rename(&tmp, &target)?;
             Ok(())
@@ -96,8 +96,11 @@ pub fn download(report: &mut dyn FnMut(Event), cancel: &AtomicBool) -> Result<To
             Err(JobError::Failed(e)) => errors.push(format!("{url}\n  {e}")),
         }
     }
-    Err(format!("Couldn't download ffmpeg. Check your internet connection and try again.\n\n{}", errors.join("\n"))
-        .into())
+    Err(format!(
+        "Couldn't download the video engine (ffmpeg). Check your internet connection and try again.\n\n{}",
+        errors.join("\n")
+    )
+    .into())
 }
 
 fn download_file(url: &str, dest: &Path, report: &mut dyn FnMut(Event), cancel: &AtomicBool) -> Result<(), JobError> {
