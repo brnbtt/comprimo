@@ -12,7 +12,7 @@ use crate::config::{Config, MAX_PRESETS, Preset, fmt_mb, human_size};
 use crate::encode::{self, Event, JobError, Outcome, Stage};
 use crate::paths::APP;
 use crate::sound::{self, Cue};
-use crate::theme::{self, BG, BORDER_STRONG, TEXT, TEXT_2, TEXT_3, light, semibold};
+use crate::theme::{self, BG, TEXT, TEXT_2, TEXT_3, light, semibold};
 use crate::{ffmpeg, icon, install, paths, win};
 
 // ---------------------------------------------------------------------------------------------
@@ -568,14 +568,29 @@ impl eframe::App for CompressApp {
 
 const SETUP_WIDTH: f32 = 440.0;
 const ROW_HEIGHT: f32 = 46.0;
+/// Presets visible before the list scrolls.
+const VISIBLE_PRESETS: usize = 6;
+const FOOTER_BUTTON: f32 = 40.0;
+/// How long the "installed ✓" pill stays before the footer settles.
+const DONE_PILL_SECS: f64 = 1.6;
+
+/// Window height for a given number of presets, so it opens at exactly the right size.
+fn setup_height(presets: usize) -> f32 {
+    let rows = presets.min(VISIBLE_PRESETS) as f32 + if presets < MAX_PRESETS { 1.0 } else { 0.0 };
+    SETUP_BASE_HEIGHT + rows * (ROW_HEIGHT + 1.0)
+}
+/// Everything but the preset rows (measured).
+const SETUP_BASE_HEIGHT: f32 = 439.0;
 
 pub fn run_setup() -> Result<(), String> {
     let cfg = Config::load();
     sound::init(cfg.sounds);
-    let guess = 420.0 + ROW_HEIGHT * cfg.presets.len().min(6) as f32;
+    let height = setup_height(cfg.presets.len());
+    let mut options = native_options(APP, [SETUP_WIDTH, height]);
+    options.viewport = options.viewport.with_minimize_button(false);
     eframe::run_native(
         APP,
-        native_options(APP, [SETUP_WIDTH, guess]),
+        options,
         Box::new(move |cc| {
             theme::install(&cc.egui_ctx);
             Ok(Box::new(SetupApp {
@@ -584,10 +599,11 @@ pub fn run_setup() -> Result<(), String> {
                 installed: install::is_installed(),
                 running_installed: paths::running_from_install_dir(),
                 task: None,
+                finished_at: None,
                 message: None,
                 logo: theme::load_logo(&cc.egui_ctx),
                 styled: false,
-                height: guess,
+                height,
                 changed_at: None,
                 saved_at: None,
             }))
@@ -602,6 +618,9 @@ struct SetupApp {
     installed: bool,
     running_installed: bool,
     task: Option<Task<()>>,
+    /// When the last install/update finished (drives the "installed ✓" pill).
+    finished_at: Option<f64>,
+    /// A one-line note under the footer buttons: (is_error, text).
     message: Option<(bool, String)>,
     logo: egui::TextureHandle,
     styled: bool,
@@ -616,6 +635,7 @@ impl SetupApp {
         self.cfg = self.cfg.clone().normalized();
         let cfg = self.cfg.clone();
         self.message = None;
+        self.finished_at = None;
         self.task = Some(Task::spawn(ctx, move |report, cancel| {
             report(Event::Status("installing".into()));
             install::install(&cfg)?;
@@ -637,11 +657,12 @@ impl SetupApp {
             Ok(()) => {
                 self.saved = self.cfg.clone();
                 self.saved_at = Some(now);
+                self.message = None;
                 sound::play(Cue::Save);
             }
             Err(e) => {
                 sound::play(Cue::Error);
-                self.message = Some((false, format!("couldn't save: {e}")));
+                self.message = Some((true, format!("couldn't save: {e}")));
             }
         }
     }
@@ -649,86 +670,98 @@ impl SetupApp {
     fn header(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             theme::logo_with_shadow(ui, &self.logo, 52.0);
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             ui.vertical(|ui| {
-                ui.add_space(3.0);
+                ui.add_space(4.0);
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new(APP).size(26.0).family(semibold()).color(TEXT));
+                ui.label(RichText::new(APP).size(25.0).family(semibold()).color(TEXT));
                 ui.label(RichText::new("compress any video to the size you need").size(13.0).color(TEXT_2));
             });
         });
     }
 
-    /// One row of a group: `left` on the left, `right` aligned right, vertically centered.
-    fn row(ui: &mut egui::Ui, left: impl FnOnce(&mut egui::Ui), right: impl FnOnce(&mut egui::Ui)) {
+    /// One row of a group: glyph, `left`, and `right` aligned right, all vertically centered.
+    fn row(
+        ui: &mut egui::Ui,
+        glyph: impl FnOnce(&mut egui::Ui),
+        left: impl FnOnce(&mut egui::Ui),
+        right: impl FnOnce(&mut egui::Ui),
+    ) {
         ui.allocate_ui_with_layout(
             Vec2::new(ui.available_width(), ROW_HEIGHT),
             Layout::left_to_right(Align::Center),
             |ui| {
+                ui.set_height(ROW_HEIGHT);
+                glyph(ui);
+                ui.add_space(12.0);
                 left(ui);
                 ui.with_layout(Layout::right_to_left(Align::Center), right);
             },
         );
     }
 
-    fn titled(ui: &mut egui::Ui, title: &str, subtitle: &str) {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 1.0;
-            ui.label(RichText::new(title).color(TEXT));
-            ui.label(RichText::new(subtitle).size(12.0).color(TEXT_3));
-        });
+    fn glyph(glyph: theme::RowGlyph) -> impl FnOnce(&mut egui::Ui) {
+        move |ui| theme::row_glyph(ui, glyph, theme::glyph_ink())
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
+        let levels = self.cfg.size_levels();
         theme::caption(ui, "right-click menu");
         theme::group(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             Self::row(
                 ui,
-                |ui| Self::titled(ui, "default", "the first entry in the menu"),
+                Self::glyph(theme::RowGlyph::Meter(levels[0])),
                 |ui| {
-                    ui.add_space(30.0);
+                    ui.label(RichText::new("default").color(TEXT));
+                },
+                |ui| {
                     theme::size_stepper(ui, &mut self.cfg.default_mb);
                 },
             );
             let mut remove = None;
-            egui::ScrollArea::vertical().max_height(ROW_HEIGHT * 6.0).auto_shrink([false, true]).show(ui, |ui| {
+            let list_height = (ROW_HEIGHT + 1.0) * VISIBLE_PRESETS as f32;
+            egui::ScrollArea::vertical().max_height(list_height).auto_shrink([false, true]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 for (i, preset) in self.cfg.presets.iter_mut().enumerate() {
                     theme::hairline(ui);
                     let area = egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), ROW_HEIGHT));
                     let hovered = ui.rect_contains_pointer(area);
+                    let level = levels.get(i + 1).copied().unwrap_or(2);
                     Self::row(
                         ui,
+                        |ui| {
+                            // While hovered, the glyph turns into a remove button.
+                            if hovered {
+                                if theme::remove_glyph(ui).clicked() {
+                                    remove = Some(i);
+                                }
+                            } else {
+                                theme::row_glyph(ui, theme::RowGlyph::Meter(level), theme::glyph_ink());
+                            }
+                        },
                         |ui| {
                             let r = ui.add(
                                 egui::TextEdit::singleline(&mut preset.name)
                                     .frame(egui::Frame::NONE)
                                     .text_color(TEXT)
                                     .hint_text("name")
+                                    .char_limit(40)
+                                    .margin(Margin::ZERO)
                                     .align(egui::Align2::LEFT_CENTER)
                                     .min_size(Vec2::new(0.0, 28.0))
-                                    .desired_width(150.0),
+                                    .desired_width(140.0),
                             );
                             if r.hovered() || r.has_focus() {
                                 ui.painter().rect_stroke(
                                     r.rect.expand2(Vec2::new(7.0, 0.0)),
                                     6,
-                                    Stroke::new(1.0, BORDER_STRONG),
+                                    Stroke::new(1.0, if r.has_focus() { theme::BORDER_STRONG } else { theme::BORDER }),
                                     egui::StrokeKind::Outside,
                                 );
                             }
                         },
                         |ui| {
-                            // The remove button only appears on hover, keeping the list calm.
-                            if hovered {
-                                if theme::round_button(ui, "×", "remove").clicked() {
-                                    remove = Some(i);
-                                }
-                            } else {
-                                ui.add_space(26.0);
-                            }
-                            ui.add_space(4.0);
                             theme::size_stepper(ui, &mut preset.mb);
                         },
                     );
@@ -739,27 +772,25 @@ impl SetupApp {
             }
             if self.cfg.presets.len() < MAX_PRESETS {
                 theme::hairline(ui);
-                Self::row(
-                    ui,
-                    |ui| {
-                        if ui.add(theme::ghost("+   add preset")).clicked() {
-                            let name = self.cfg.next_preset_name();
-                            let mb = self.cfg.presets.last().map(|p| p.mb * 2.0).unwrap_or(10.0).min(1000.0);
-                            self.cfg.presets.push(Preset { name, mb });
-                        }
-                    },
-                    |_| {},
-                );
+                if theme::action_row(ui, ROW_HEIGHT, theme::RowGlyph::Plus, "add preset").clicked() {
+                    let name = self.cfg.next_preset_name();
+                    let mb = self.cfg.presets.last().map(|p| p.mb * 2.0).unwrap_or(10.0).min(1000.0);
+                    self.cfg.presets.push(Preset { name, mb });
+                }
             }
         });
 
-        ui.add_space(14.0);
+        ui.add_space(16.0);
         theme::caption(ui, "feel");
         theme::group(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
             Self::row(
                 ui,
-                |ui| Self::titled(ui, "haptics", "tactile sounds while compressing"),
+                Self::glyph(theme::RowGlyph::Sound),
+                |ui| {
+                    ui.label(RichText::new("haptics").color(TEXT));
+                    ui.label(RichText::new("tactile sounds while compressing").size(12.0).color(TEXT_3));
+                },
                 |ui| {
                     if theme::toggle(ui, &mut self.cfg.sounds).changed() {
                         if self.cfg.sounds {
@@ -775,78 +806,91 @@ impl SetupApp {
         });
     }
 
+    /// Fixed-height footer: a 40 pt action row and one line of status underneath. Every state
+    /// (install button, progress, done, installed) uses the same space, so the window never jumps.
     fn footer(&mut self, ui: &mut egui::Ui, snapshot: Option<&Snapshot<()>>, now: f64) {
         let ctx = ui.ctx().clone();
+        let mut note: (bool, String) = (false, String::new());
 
         if let Some(s) = snapshot {
-            egui::Sides::new().show(
-                ui,
-                |ui| {
-                    ui.label(RichText::new(&s.status).size(13.0).color(TEXT_2));
-                },
-                |ui| {
-                    ui.label(RichText::new(&s.detail).size(12.0).color(TEXT_3));
-                },
-            );
-            theme::progress_bar(ui, s.progress, Some(now));
+            let progress = (s.progress > 0.0).then_some(s.progress);
+            let shown = progress.map(|p| ctx.animate_value_with_time(egui::Id::unique("install-progress"), p, 0.25));
+            let label = match progress {
+                Some(p) => format!("{} · {:.0}%", short_status(&s.status), p * 100.0),
+                None => short_status(&s.status).to_string(),
+            };
+            theme::progress_pill(ui, FOOTER_BUTTON, shown, &label, now);
+            note.1 = if s.detail.is_empty() { "one moment".into() } else { s.detail.clone() };
             ctx.request_repaint_after(Duration::from_millis(16));
-            return;
-        }
-
-        if let Some((ok, msg)) = &self.message {
-            ui.horizontal(|ui| {
-                if *ok {
-                    theme::check_badge(ui, 18.0, 1.0);
-                } else {
-                    theme::cross_badge(ui, 18.0);
-                }
-                ui.label(RichText::new(msg).size(12.5).color(if *ok { TEXT_2 } else { TEXT }));
-            });
-            ui.add_space(10.0);
-        }
-
-        if !self.installed {
-            if ui.add_sized([ui.available_width(), 40.0], theme::primary(&format!("install {APP}"))).clicked() {
+        } else if let Some(t) = self.finished_at.filter(|t| now - t < DONE_PILL_SECS) {
+            theme::done_pill(ui, FOOTER_BUTTON, "installed", ((now - t) / 0.45) as f32);
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else if !self.installed {
+            if ui.add_sized([ui.available_width(), FOOTER_BUTTON], theme::primary(&format!("install {APP}"))).clicked()
+            {
                 self.start_install(&ctx);
             }
-            ui.vertical_centered(|ui| {
-                ui.label(
-                    RichText::new("adds it to the right-click menu of your videos · no admin needed")
-                        .size(12.0)
-                        .color(TEXT_3),
-                );
-            });
-            return;
+            note.1 = "adds it to the right-click menu of your videos · no admin needed".into();
+        } else {
+            let (mut uninstall, mut update) = (false, false);
+            ui.allocate_ui_with_layout(
+                Vec2::new(ui.available_width(), FOOTER_BUTTON),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    uninstall = ui.add(theme::ghost("uninstall")).clicked();
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.running_installed {
+                            ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(12.0).color(TEXT_3));
+                        } else {
+                            update = ui.add(theme::secondary("update installed copy")).clicked();
+                        }
+                    });
+                },
+            );
+            if update {
+                self.start_install(&ctx);
+            }
+            if uninstall && win::confirm(&format!("Remove {APP} from this computer?")) {
+                install::uninstall();
+                win::info_box(&format!("{APP} has been removed."));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            note.1 = match (self.cfg != self.saved, self.saved_at) {
+                (true, _) => "saving…".into(),
+                (false, Some(t)) if now - t < 2.5 => "saved".into(),
+                _ => "changes save automatically".into(),
+            };
+        }
+        if snapshot.is_none()
+            && let Some(m) = &self.message
+        {
+            note = m.clone();
         }
 
-        let (mut uninstall, mut update) = (false, false);
-        egui::Sides::new().show(
-            ui,
-            |ui| {
-                uninstall = ui.add(theme::ghost("uninstall")).clicked();
-            },
-            |ui| {
-                if !self.running_installed {
-                    update = ui.add(theme::secondary("update installed copy")).clicked();
-                }
-                let pending = self.cfg != self.saved;
-                let status = match (pending, self.saved_at) {
-                    (true, _) => "saving…",
-                    (false, Some(t)) if now - t < 2.5 => "saved",
-                    _ => "changes save automatically",
-                };
-                ui.label(RichText::new(status).size(12.0).color(TEXT_3));
-            },
-        );
-        if update {
-            self.start_install(&ctx);
-        }
-        if uninstall && win::confirm(&format!("Remove {APP} from this computer?")) {
-            install::uninstall();
-            win::info_box(&format!("{APP} has been removed."));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        ui.add_space(6.0);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), egui::Sense::hover());
+        let color = if note.0 { TEXT } else { TEXT_3 };
+        let font = egui::FontId::proportional(12.0);
+        let galley = ui.painter().layout(note.1.clone(), font, color, f32::INFINITY);
+        let fits = galley.size().x <= rect.width();
+        let text = if fits {
+            note.1.clone()
+        } else {
+            // Long errors: keep one line here, the full text is in the tooltip.
+            let mut t: String = note.1.lines().next().unwrap_or_default().chars().take(64).collect();
+            t.push('…');
+            t
+        };
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(12.0), color);
+        if !fits {
+            response.on_hover_text(&note.1);
         }
     }
+}
+
+/// Footer pill label for a task status ("downloading ffmpeg · one-time setup" → "downloading ffmpeg").
+fn short_status(status: &str) -> &str {
+    status.split(" · ").next().unwrap_or(status)
 }
 
 impl eframe::App for SetupApp {
@@ -854,6 +898,17 @@ impl eframe::App for SetupApp {
         style_chrome(frame, &mut self.styled);
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
+
+        // Debug builds: `COMPRIMO_TEST_INSTALL=1` runs the install flow on start (for screenshots).
+        #[cfg(debug_assertions)]
+        if self.task.is_none()
+            && self.finished_at.is_none()
+            && self.message.is_none()
+            && std::env::var_os("COMPRIMO_TEST_INSTALL").is_some()
+            && now > 0.5
+        {
+            self.start_install(&ctx);
+        }
 
         let snapshot = self.task.as_ref().map(|t| t.snapshot());
         if let Some(s) = &snapshot {
@@ -863,17 +918,13 @@ impl eframe::App for SetupApp {
                     self.installed = true;
                     self.saved = self.cfg.clone();
                     self.task = None;
-                    sound::play(Cue::Done);
-                    self.message = Some((
-                        true,
-                        format!(
-                            "installed · right-click any video → {APP}\non windows 11 it's under \"show more options\""
-                        ),
-                    ));
+                    self.finished_at = Some(now);
+                    sound::play(Cue::Installed);
+                    self.message = Some((false, install::where_to_find()));
                 }
                 Phase::Failed(e) => {
                     sound::play(Cue::Error);
-                    self.message = Some((false, e.clone()));
+                    self.message = Some((true, e.clone()));
                     self.task = None;
                 }
                 Phase::Cancelled => self.task = None,
@@ -902,11 +953,11 @@ impl eframe::App for SetupApp {
             .show(ui, |ui| {
                 theme::top_glow(ui);
                 let top = ui.cursor().top();
-                ui.add_space(4.0);
+                ui.add_space(2.0);
                 self.header(ui);
-                ui.add_space(22.0);
+                ui.add_space(24.0);
                 ui.add_enabled_ui(!busy, |ui| self.settings(ui));
-                ui.add_space(22.0);
+                ui.add_space(20.0);
                 self.footer(ui, running, now);
                 ui.cursor().top() - top
             })

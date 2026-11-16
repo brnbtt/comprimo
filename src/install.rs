@@ -8,6 +8,7 @@ use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 
 use crate::config::{Config, fmt_mb};
 use crate::encode::CREATE_NO_WINDOW;
+use crate::icon::Glyph;
 use crate::paths::{self, APP};
 use crate::{icon, win};
 
@@ -45,23 +46,86 @@ pub fn install(cfg: &Config) -> Result<PathBuf, String> {
             )
         })?;
     }
-    let _ = std::fs::write(paths::icon_file(), icon::ico_bytes());
+    write_icons();
     cfg.save().map_err(|e| format!("Couldn't save settings: {e}"))?;
     register_menu(&target, cfg).map_err(|e| format!("Couldn't add the right-click menu: {e}"))?;
     register_uninstaller(&target).map_err(|e| format!("Couldn't register the uninstaller: {e}"))?;
     Ok(target)
 }
 
+/// The app icon and the menu glyphs (both menu themes).
+fn write_icons() {
+    let _ = std::fs::create_dir_all(paths::icons_dir());
+    let _ = std::fs::remove_file(paths::legacy_icon_file());
+    let _ = std::fs::write(paths::icon_file(), icon::ico_bytes());
+    for light in [false, true] {
+        for glyph in (1..=4).map(Glyph::Size).chain([Glyph::Settings]) {
+            let _ = std::fs::write(paths::menu_icon_file(glyph, light), icon::glyph_ico(glyph, light));
+        }
+    }
+}
+
+/// Context menus follow the Windows app theme; the menu glyphs come in a light and a dark ink.
+fn light_menus() -> bool {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
+        .is_ok_and(|v| v != 0)
+}
+
+/// Re-registers the menu if its glyphs don't match the current theme (or are missing, e.g. after
+/// updating from a version without them). Explorer can't swap them by itself, so this runs
+/// whenever comprimo starts.
+pub fn refresh_menu_icons() {
+    if !is_installed() {
+        return;
+    }
+    let expected = paths::menu_icon_file(Glyph::Settings, light_menus());
+    let current = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(format!(r"{}\shell", menu_key("mp4")))
+        .ok()
+        .and_then(|shell| shell.enum_keys().flatten().last().and_then(|k| shell.open_subkey(k).ok()))
+        .and_then(|item| item.get_value::<String, _>("Icon").ok());
+    if current.as_deref() != Some(&*expected.display().to_string()) || !expected.is_file() {
+        write_icons();
+        let _ = register_menu(&paths::installed_exe(), &Config::load());
+    }
+}
+
+/// Where to find the entry: Windows 11's compact menu tucks classic entries under "show more options".
+pub fn where_to_find() -> String {
+    let build = RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
+        .and_then(|k| k.get_value::<String, _>("CurrentBuildNumber"))
+        .ok()
+        .and_then(|b| b.parse::<u32>().ok())
+        .unwrap_or(0);
+    let classic_forced = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32")
+        .is_ok();
+    if build >= 22000 && !classic_forced {
+        format!("right-click a video → show more options → {APP}")
+    } else {
+        format!("right-click any video → {APP}")
+    }
+}
+
 /// The right-click submenu: "default (20 MB)", one entry per preset, then "settings…".
-pub fn menu_entries(cfg: &Config) -> Vec<(String, String)> {
-    let mut entries = vec![(format!("default ({} MB)", fmt_mb(cfg.default_mb)), "compress \"%1\"".to_string())];
-    for preset in &cfg.presets {
+pub fn menu_entries(cfg: &Config) -> Vec<(String, String, Glyph)> {
+    let levels = cfg.size_levels();
+    let mut entries = vec![(
+        format!("default ({} MB)", fmt_mb(cfg.default_mb)),
+        "compress \"%1\"".to_string(),
+        Glyph::Size(levels[0]),
+    )];
+    for (preset, &level) in cfg.presets.iter().zip(&levels[1..]) {
         entries.push((
             format!("{} ({} MB)", preset.name, fmt_mb(preset.mb)),
             format!("compress --size {} \"%1\"", preset.mb),
+            Glyph::Size(level),
         ));
     }
-    entries.push(("settings…".into(), "settings".into()));
+    entries.push(("settings…".into(), "settings".into(), Glyph::Settings));
     entries
 }
 
@@ -70,6 +134,7 @@ pub fn register_menu(exe: &Path, cfg: &Config) -> io::Result<()> {
     let exe = exe.display().to_string();
     let icon = paths::icon_file();
     let entries = menu_entries(cfg);
+    let light = light_menus();
 
     for ext in EXTENSIONS {
         let path = menu_key(ext);
@@ -82,10 +147,14 @@ pub fn register_menu(exe: &Path, cfg: &Config) -> io::Result<()> {
             root.set_value("Icon", &icon.display().to_string())?;
         }
         let last = entries.len() - 1;
-        for (i, (label, args)) in entries.iter().enumerate() {
+        for (i, (label, args, glyph)) in entries.iter().enumerate() {
             let (item, _) = root.create_subkey(format!(r"shell\{i:02}"))?;
             item.set_value("MUIVerb", label)?;
             item.set_value("MultiSelectModel", &"Player")?;
+            let glyph_file = paths::menu_icon_file(*glyph, light);
+            if glyph_file.is_file() {
+                item.set_value("Icon", &glyph_file.display().to_string())?;
+            }
             if i == last {
                 item.set_value("CommandFlags", &ECF_SEPARATORBEFORE)?;
             }
@@ -160,5 +229,7 @@ mod tests {
         };
         let labels: Vec<String> = menu_entries(&cfg).into_iter().map(|e| e.0).collect();
         assert_eq!(labels, ["default (20 MB)", "small (10 MB)", "email (24.5 MB)", "settings…"]);
+        let glyphs: Vec<Glyph> = menu_entries(&cfg).into_iter().map(|e| e.2).collect();
+        assert_eq!(glyphs, [Glyph::Size(3), Glyph::Size(1), Glyph::Size(4), Glyph::Settings]);
     }
 }

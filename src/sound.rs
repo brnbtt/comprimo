@@ -17,7 +17,7 @@ pub const BLOCK_VARIANTS: u8 = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Cue {
-    /// Compression begins: a "click-clack" latch.
+    /// Compression begins: two quick dry taps.
     Start,
     /// A block lands in the progress grid. (variant, pan -2..=2)
     Block(u8, i8),
@@ -30,6 +30,8 @@ pub enum Cue {
     Finish(u8),
     /// Nothing needed building (the file was already small enough).
     Done,
+    /// Installed or updated from the settings window: a short rising run.
+    Installed,
     Error,
     Cancel,
     /// File copied to the clipboard.
@@ -102,6 +104,7 @@ pub fn demo_sequence() -> Vec<(Cue, u64)> {
     seq.extend([
         (Cue::Finish(24), 1300),
         (Cue::Done, 1000),
+        (Cue::Installed, 900),
         (Cue::Copy, 700),
         (Cue::Save, 700),
         (Cue::ToggleOn, 500),
@@ -250,13 +253,30 @@ fn render(cue: Cue) -> Vec<f32> {
             m.finish_dry()
         }
         Cue::Start => {
-            let mut m = Mix::new(0.16);
-            m.body(0.0, 1750.0, 0.007, 0.24, 0.10, -0.1);
-            m.body(0.0, 165.0, 0.018, 0.20, 0.6, -0.1);
-            m.noise(0.0, 4200.0, 1.2, 0.0003, 0.003, 0.18, -0.1, 11);
-            m.body(0.055, 1180.0, 0.010, 0.22, 0.10, 0.1);
-            m.body(0.055, 125.0, 0.024, 0.20, 0.6, 0.1);
-            m.noise(0.055, 2800.0, 1.0, 0.0003, 0.004, 0.14, 0.1, 13);
+            // Two dry taps in quick succession, like the progress taps: "t-tk".
+            let mut m = Mix::new(0.09);
+            m.noise(0.0, 3000.0, 1.0, 0.0002, 0.0014, 0.26, -0.25, 11);
+            m.body(0.0, 1500.0, 0.003, 0.13, 0.05, -0.25);
+            m.noise(0.034, 3900.0, 1.1, 0.0002, 0.0014, 0.30, 0.25, 13);
+            m.body(0.034, 1950.0, 0.003, 0.14, 0.05, 0.25);
+            m.finish_dry()
+        }
+        Cue::Installed => {
+            // A short version of the finishing scan: a quick rising run that clicks into place.
+            let (n, step) = (7, 0.026f32);
+            let end = n as f32 * step;
+            let mut m = Mix::new(end + 0.1);
+            for k in 0..n {
+                let x = k as f32 / (n - 1) as f32;
+                let at = k as f32 * step;
+                let pitch = 1400.0 * 2f32.powf(x);
+                let pan = -0.4 + 0.8 * x;
+                let level = 0.10 + 0.07 * x;
+                m.body(at, pitch, 0.004, level, 0.06, pan);
+                m.noise(at, pitch * 2.1, 1.3, 0.0003, 0.0018, level * 0.9, pan, 200 + k);
+            }
+            m.body(end, 3300.0, 0.006, 0.20, 0.06, 0.4);
+            m.noise(end, 6200.0, 1.4, 0.0002, 0.0022, 0.17, 0.4, 199);
             m.finish()
         }
         Cue::Retry => {

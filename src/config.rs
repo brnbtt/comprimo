@@ -79,6 +79,22 @@ impl Config {
             .find(|name| !self.presets.iter().any(|p| p.name.eq_ignore_ascii_case(name)))
             .unwrap()
     }
+
+    /// How "big" each menu entry is on a 1–4 scale (default first, then the presets), for the
+    /// block meter shown next to it. Relative to the other entries, on a log scale.
+    pub fn size_levels(&self) -> Vec<u8> {
+        let sizes: Vec<f64> = std::iter::once(self.default_mb).chain(self.presets.iter().map(|p| p.mb)).collect();
+        let (lo, hi) = sizes.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &s| (lo.min(s), hi.max(s)));
+        sizes
+            .iter()
+            .map(|&s| {
+                if hi / lo < 1.2 {
+                    return 2;
+                }
+                1 + (3.0 * (s / lo).ln() / (hi / lo).ln()).round() as u8
+            })
+            .collect()
+    }
 }
 
 fn clean_mb(mb: f64) -> f64 {
@@ -88,22 +104,6 @@ fn clean_mb(mb: f64) -> f64 {
 /// "10", "9.5"
 pub fn fmt_mb(mb: f64) -> String {
     format!("{mb}")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn old_config_is_upgraded() {
-        let old = r#"{"default_mb":20.0,"slots":[{"name":"custom1","mb":10.0},{"name":"custom2","mb":25.0},{"name":"custom3","mb":50.0}]}"#;
-        let cfg = serde_json::from_str::<Config>(old).unwrap().normalized();
-        assert_eq!(cfg, Config::default());
-
-        let edited = r#"{"default_mb":15.0,"slots":[{"name":"custom1","mb":8.0}]}"#;
-        let cfg = serde_json::from_str::<Config>(edited).unwrap().normalized();
-        assert_eq!((cfg.default_mb, cfg.presets[0].name.as_str(), cfg.sounds), (15.0, "custom1", true));
-    }
 }
 
 pub fn human_size(bytes: u64) -> String {
@@ -124,4 +124,27 @@ pub fn fmt_duration(secs: f64) -> String {
     let s = secs.round() as u64;
     let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
     if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m}:{s:02}") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_config_is_upgraded() {
+        let old = r#"{"default_mb":20.0,"slots":[{"name":"custom1","mb":10.0},{"name":"custom2","mb":25.0},{"name":"custom3","mb":50.0}]}"#;
+        let cfg = serde_json::from_str::<Config>(old).unwrap().normalized();
+        assert_eq!(cfg, Config::default());
+
+        let edited = r#"{"default_mb":15.0,"slots":[{"name":"custom1","mb":8.0}]}"#;
+        let cfg = serde_json::from_str::<Config>(edited).unwrap().normalized();
+        assert_eq!((cfg.default_mb, cfg.presets[0].name.as_str(), cfg.sounds), (15.0, "custom1", true));
+    }
+
+    #[test]
+    fn size_levels_are_relative() {
+        assert_eq!(Config::default().size_levels(), [2, 1, 3, 4]);
+        let single = Config { presets: vec![], ..Config::default() };
+        assert_eq!(single.size_levels(), [2]);
+    }
 }

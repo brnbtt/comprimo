@@ -19,8 +19,21 @@ pub fn installed_exe() -> PathBuf {
     install_dir().join(format!("{APP}.exe"))
 }
 
+pub fn icons_dir() -> PathBuf {
+    install_dir().join("icons")
+}
+
 pub fn icon_file() -> PathBuf {
+    icons_dir().join(format!("{APP}.ico"))
+}
+
+/// Where earlier versions kept the icon (Explorer caches icons by path, so the new one moved).
+pub fn legacy_icon_file() -> PathBuf {
     install_dir().join(format!("{APP}.ico"))
+}
+
+pub fn menu_icon_file(glyph: crate::icon::Glyph, light_menu: bool) -> PathBuf {
+    icons_dir().join(format!("{}-{}.ico", if light_menu { "light" } else { "dark" }, glyph.file_stem()))
 }
 
 pub fn ffmpeg_dir() -> PathBuf {

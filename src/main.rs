@@ -22,6 +22,10 @@ use paths::APP;
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let quiet = args.iter().any(|a| a == "--quiet");
+    win::block_overlay_injection();
+    if matches!(args.first().map(String::as_str), None | Some("settings" | "compress")) {
+        install::refresh_menu_icons();
+    }
 
     let result = match args.first().map(String::as_str) {
         None | Some("settings") => ui::run_setup(),

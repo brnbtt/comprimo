@@ -42,6 +42,21 @@ pub fn confirm(text: &str) -> bool {
     }
 }
 
+/// Opts out of legacy injection (global window hooks, AppInit DLLs). Overlays like RivaTuner /
+/// MSI Afterburner use these to draw FPS counters into anything that renders with the GPU,
+/// which is wrong for a small utility window. Must run before any window is created.
+pub fn block_overlay_injection() {
+    use windows_sys::Win32::System::Threading::{ProcessExtensionPointDisablePolicy, SetProcessMitigationPolicy};
+    const DISABLE_EXTENSION_POINTS: u32 = 1;
+    unsafe {
+        SetProcessMitigationPolicy(
+            ProcessExtensionPointDisablePolicy,
+            &DISABLE_EXTENSION_POINTS as *const u32 as *const _,
+            std::mem::size_of::<u32>(),
+        );
+    }
+}
+
 /// Puts the process (and every ffmpeg it spawns) in a job that dies with us,
 /// so closing the window never leaves a stray encoder running.
 pub fn kill_children_on_exit() {

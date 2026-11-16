@@ -209,10 +209,156 @@ pub fn group<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
-/// Quiet lowercase caption above a group.
+/// A quiet lowercase caption above a group, inset to line up with the rows' content.
 pub fn caption(ui: &mut Ui, text: &str) {
-    ui.add_space(2.0);
-    ui.label(RichText::new(text).size(12.0).color(TEXT_3));
+    ui.horizontal(|ui| {
+        ui.add_space(16.0);
+        ui.label(RichText::new(text).size(12.0).color(TEXT_3));
+    });
+    ui.add_space(-2.0);
+}
+
+/// Small glyphs shown at the start of settings rows (16 × 16 points).
+#[derive(Clone, Copy)]
+pub enum RowGlyph {
+    /// The 2×2 size meter, as in the right-click menu (level 1–4).
+    Meter(u8),
+    Plus,
+    Sound,
+}
+
+pub const GLYPH_SIZE: f32 = 16.0;
+const GLYPH_INK: Color32 = Color32::from_gray(214);
+const GLYPH_DIM: Color32 = Color32::from_gray(54);
+
+pub fn row_glyph(ui: &mut Ui, glyph: RowGlyph, ink: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(GLYPH_SIZE), Sense::hover());
+    let p = ui.painter();
+    let c = rect.center();
+    match glyph {
+        RowGlyph::Meter(level) => {
+            let (cell, gap) = (6.0, 2.0);
+            let filled = crate::icon::meter_filled(level);
+            for (row, cols) in filled.iter().enumerate() {
+                for (col, &on) in cols.iter().enumerate() {
+                    let min = rect.min + Vec2::new(1.0 + col as f32 * (cell + gap), 1.0 + row as f32 * (cell + gap));
+                    let r = Rect::from_min_size(min, Vec2::splat(cell));
+                    p.rect_filled(r, CornerRadius::same(1), if on { ink } else { GLYPH_DIM });
+                }
+            }
+        }
+        RowGlyph::Plus => {
+            let s = Stroke::new(1.5, ink);
+            p.line_segment([c - Vec2::new(5.5, 0.0), c + Vec2::new(5.5, 0.0)], s);
+            p.line_segment([c - Vec2::new(0.0, 5.5), c + Vec2::new(0.0, 5.5)], s);
+        }
+        RowGlyph::Sound => {
+            for (i, h) in [6.0f32, 13.0, 9.0, 4.0].into_iter().enumerate() {
+                let x = rect.left() + 2.0 + i as f32 * 4.0;
+                let r = Rect::from_center_size(Pos2::new(x + 1.0, c.y), Vec2::new(2.0, h));
+                p.rect_filled(r, CornerRadius::same(1), ink);
+            }
+        }
+    }
+}
+
+/// A 16 × 16 "×" that replaces a row's glyph while the row is hovered.
+pub fn remove_glyph(ui: &mut Ui) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(GLYPH_SIZE), Sense::click());
+    let p = ui.painter();
+    let c = rect.center();
+    let hot = response.hovered();
+    p.circle_filled(c, 10.0, if hot { Color32::from_gray(48) } else { SURFACE_2 });
+    let d = 3.6;
+    let s = Stroke::new(1.5, if hot { TEXT } else { TEXT_2 });
+    p.line_segment([c + Vec2::new(-d, -d), c + Vec2::new(d, d)], s);
+    p.line_segment([c + Vec2::new(-d, d), c + Vec2::new(d, -d)], s);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("remove")
+}
+
+pub fn glyph_ink() -> Color32 {
+    GLYPH_INK
+}
+
+/// A whole-width clickable row (used for "add preset"): brightens on hover.
+pub fn action_row(ui: &mut Ui, height: f32, glyph: RowGlyph, text: &str) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::click());
+    let hovered = response.hovered();
+    let color = if hovered { TEXT } else { TEXT_2 };
+    let mut child =
+        ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    row_glyph(&mut child, glyph, color);
+    child.add_space(12.0);
+    child.label(RichText::new(text).color(color));
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A button-sized pill that fills up as work progresses, with its label inverting over the fill.
+/// `progress = None` shows an indeterminate shimmer.
+pub fn progress_pill(ui: &mut Ui, height: f32, progress: Option<f32>, label: &str, time: f64) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    let p = ui.painter();
+    let radius = CornerRadius::same(8);
+    p.rect(rect, radius, SURFACE_2, Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
+    let font = FontId::new(14.0, semibold());
+    let fill_w = progress.map_or(0.0, |v| rect.width() * v.clamp(0.0, 1.0));
+    let fill = Rect::from_min_size(rect.min, Vec2::new(fill_w, rect.height()));
+    if fill_w > 0.5 {
+        p.with_clip_rect(fill).rect_filled(rect, radius, ACCENT);
+    }
+    if progress.is_none() {
+        // Indeterminate: a soft highlight sweeping across.
+        let band = rect.width() * 0.35;
+        let x = rect.left() - band + ((time * 0.6).fract() as f32) * (rect.width() + band * 2.0);
+        let mut mesh = egui::Mesh::default();
+        for (sx, alpha) in [(x - band, 0u8), (x, 22u8), (x + band, 0u8)] {
+            let c = Color32::from_white_alpha(alpha);
+            mesh.colored_vertex(Pos2::new(sx, rect.top()), c);
+            mesh.colored_vertex(Pos2::new(sx, rect.bottom()), c);
+        }
+        for i in 0..2u32 {
+            let b = i * 2;
+            mesh.add_triangle(b, b + 1, b + 2);
+            mesh.add_triangle(b + 1, b + 2, b + 3);
+        }
+        p.with_clip_rect(rect.shrink(1.0)).add(Shape::mesh(mesh));
+    }
+    p.text(rect.center(), egui::Align2::CENTER_CENTER, label, font.clone(), TEXT);
+    if fill_w > 0.5 {
+        p.with_clip_rect(fill).text(rect.center(), egui::Align2::CENTER_CENTER, label, font, ON_ACCENT);
+    }
+}
+
+/// The finished state of [`progress_pill`]: solid white with a check, "installed".
+pub fn done_pill(ui: &mut Ui, height: f32, label: &str, t: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(rect, CornerRadius::same(8), ACCENT);
+    let font = FontId::new(14.0, semibold());
+    let galley = p.layout_no_wrap(label.to_string(), font, ON_ACCENT);
+    let (check, gap) = (16.0, 8.0);
+    let total = check + gap + galley.size().x;
+    let left = rect.center().x - total / 2.0;
+    let c = Pos2::new(left + check / 2.0, rect.center().y);
+    draw_check(p, c, check / 2.0, t, ON_ACCENT, 1.8);
+    p.galley(Pos2::new(left + check + gap, rect.center().y - galley.size().y / 2.0), galley, ON_ACCENT);
+}
+
+/// A check mark that draws itself in as `t` goes 0 → 1, centered on `c` with half-size `s`.
+fn draw_check(p: &egui::Painter, c: Pos2, s: f32, t: f32, color: Color32, width: f32) {
+    let ease = 1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3);
+    let pts =
+        [c + Vec2::new(-0.62 * s, 0.02 * s), c + Vec2::new(-0.18 * s, 0.46 * s), c + Vec2::new(0.66 * s, -0.44 * s)];
+    let seg1 = (pts[1] - pts[0]).length();
+    let seg2 = (pts[2] - pts[1]).length();
+    let drawn = ease * (seg1 + seg2);
+    let stroke = Stroke::new(width, color);
+    if drawn <= seg1 {
+        p.line_segment([pts[0], pts[0] + (pts[1] - pts[0]) * (drawn / seg1)], stroke);
+    } else {
+        p.line_segment([pts[0], pts[1]], stroke);
+        p.line_segment([pts[1], pts[1] + (pts[2] - pts[1]) * ((drawn - seg1) / seg2)], stroke);
+    }
 }
 
 /// A soft glow behind the top of the window.
@@ -286,44 +432,6 @@ pub fn toggle(ui: &mut Ui, on: &mut bool) -> Response {
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
-}
-
-/// Thin rounded bar. With `shimmer`, a soft highlight sweeps across the filled part.
-pub fn progress_bar(ui: &mut Ui, value: f32, shimmer: Option<f64>) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 6.0), Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(3), SURFACE_2);
-    let value = value.clamp(0.0, 1.0);
-    if value <= 0.0 {
-        return;
-    }
-    let fill = Rect::from_min_max(rect.min, Pos2::new(rect.left() + rect.width() * value, rect.bottom()));
-    let fill = fill.intersect(rect).expand2(Vec2::new(0.0, 0.0));
-    painter.rect_filled(
-        Rect::from_min_size(fill.min, Vec2::new(fill.width().max(6.0), fill.height())),
-        CornerRadius::same(3),
-        Color32::from_gray(214),
-    );
-
-    if let Some(time) = shimmer {
-        let band = 90.0;
-        let travel = fill.width() + band * 2.0;
-        let x = fill.left() - band + ((time * 0.55).fract() as f32) * travel;
-        let clip = painter.with_clip_rect(fill);
-        let mut mesh = egui::Mesh::default();
-        let stops = [(x - band, 0u8), (x, 150u8), (x + band, 0u8)];
-        for (sx, alpha) in stops {
-            let c = Color32::from_white_alpha(alpha);
-            mesh.colored_vertex(Pos2::new(sx, fill.top()), c);
-            mesh.colored_vertex(Pos2::new(sx, fill.bottom()), c);
-        }
-        for i in 0..2u32 {
-            let b = i * 2;
-            mesh.add_triangle(b, b + 1, b + 2);
-            mesh.add_triangle(b + 1, b + 2, b + 3);
-        }
-        clip.add(Shape::mesh(mesh));
-    }
 }
 
 /// White disc with a check mark that draws itself in as `t` goes 0 → 1.

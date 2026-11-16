@@ -37,7 +37,8 @@ comprimo ▸  default (20 MB)
 ```
 
 In **settings…** you can change the default size and add, rename, resize or remove presets (changes save automatically). Each
-preset shows up in the menu as `name (size)`.
+preset shows up in the menu as `name (size)`. Next to each entry, a small 2×2 block meter shows how big it is compared to
+the others (1 block for the smallest, 4 for the largest). The menu icons follow your light/dark theme.
 
 The output is saved next to the original as `name_20MB.mp4`. When it's done, **copy file** puts it
 on the clipboard so you can paste it straight into a chat, an email or a folder.
@@ -57,12 +58,13 @@ comprimo gives dry, tactile sound feedback while it works (you can turn it off i
 
 | Moment | Cue |
 |---|---|
-| Compression starts | a "click-clack" latch |
+| Compression starts | two quick, dry taps |
 | A block lands | a tiny, dry tap, slightly different every time and panned to where it lands |
 | A column of 4 fills up | a slightly fuller tap, so the build has a tap-tap-tap-tock rhythm |
 | Came out too big, retrying | three quick falling clicks as the extra blocks drop away |
 | Done | the finishing scan: one click per column, rising in pitch from left to right, ending in a crisp snap |
 | Already small enough | a solid "thunk" and a "snap", like a case closing |
+| Installed / updated | a short rising run of clicks that snaps into place |
 | Error / cancel | two soft dull thuds / a single low thud |
 | File copied | a tiny "tick-tick" |
 
@@ -194,8 +196,9 @@ Run the ffmpeg workflow once before the first release, so installs can download 
 | `src/blocks.rs` | The block-building progress animation |
 | `src/theme.rs` | Colors, fonts and custom widgets |
 | `src/sound.rs` | Synthesized audio cues |
-| `src/icon.rs` | The app icon, drawn in code |
-| `src/win.rs` | Win32 helpers (clipboard, message boxes, job object) |
+| `src/icon.rs` | The app icon (a "c" made of blocks) and the menu glyphs, drawn in code |
+| `build.rs` | Embeds the icon and version info in the exe |
+| `src/win.rs` | Win32 helpers (clipboard, message boxes, job object, blocking game overlays) |
 
 ## License
 

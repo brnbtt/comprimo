@@ -30,6 +30,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+miniz_oxide = "0.9"
 
 [profile.release]
 opt-level = "s"
@@ -37,3 +38,7 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+[build-dependencies]
+miniz_oxide = "0.9"
+winresource = "0.1.34"
